@@ -48,23 +48,20 @@ def save_audio(path: str, audio: torch.Tensor, sr: int = 16000) -> None:
 margin loss 是逐帧的, 因此必须把原始转录对齐到每个时间步才能得到 labels y_f
 """
 def get_alignment(audio: torch.Tensor,
-                  processor: Wav2Vec2Processor,
                   model: Wav2Vec2ForCTC,
                   device: str | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """
     对输入 waveform 做 CTC 贪心对齐，返回 logits [T, C] 和每帧预测标签 y_f [T]。
+    直接使用模型接收 raw waveform，保证梯度连通性。
     """
     if device is None:
         device = next(model.parameters()).device
     model.eval()
+    # 直接将 waveform 送入模型
     with torch.no_grad():
-        inputs = processor(audio,
-                           sampling_rate=processor.feature_extractor.sampling_rate,
-                           return_tensors="pt",
-                           padding=True)
-        input_values = inputs.input_values.to(device)
+        input_values = audio.unsqueeze(0).to(device)  # [1, L]
         logits = model(input_values).logits.squeeze(0)  # [T, C]
-    y_f = torch.argmax(logits, dim=-1)  # [T]
+    y_f = torch.argmax(logits, dim=-1)
     return logits, y_f
 
 

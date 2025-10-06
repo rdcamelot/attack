@@ -64,19 +64,24 @@ def main():
         # 合成对抗样本并裁剪到 [-1,1]
         x_adv = torch.clamp(x_orig + delta, -1.0, 1.0)
 
-        # 前向，得到 logits_adv
-        inputs = processor(x_adv,
-                           sampling_rate=processor.feature_extractor.sampling_rate,
-                           return_tensors="pt",
-                           padding=True)
-        input_values = inputs.input_values.to(device)
+        # 前向，直接使用 raw waveform 以保证梯度连通
+        input_values = x_adv.unsqueeze(0).to(device)  # [1, L]
         logits_adv = model(input_values).logits.squeeze(0)  # [T, C]
 
         # 4. 计算攻击损失并反向更新 δ
         loss = attack_loss(logits_adv, y_f, delta, args.c, args.alpha, args.k)
         optimizer.zero_grad()
         loss.backward()
+        # Debug: print gradient norm of delta to check if gradients flow
+        if delta.grad is not None:
+            grad_norm = delta.grad.norm().item()
+        else:
+            grad_norm = float('nan')
+        print(f"Debug: iteration {it}, delta.grad.norm={grad_norm:.6f}")
         optimizer.step()
+        # Debug: print updated delta norm to verify updates
+        delta_norm = delta.norm().item()
+        print(f"Debug: iteration {it}, delta.norm={delta_norm:.6f}")
 
         # 每 10 次打印进度
         if it % 10 == 0 or it == 1:
