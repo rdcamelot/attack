@@ -9,3 +9,8 @@
 选择使用 Hugging Face Transformers 的方式，来安装预训练模型
 
 解码时使用 beam search ,不额外使用 LM
+
+### 攻击代码
+攻击代码存放在 attack 文件夹下，首先实现的是以 Wav2vec 作为攻击模型，节省扰动作为攻击思路的代码
+
+损失函数使用的是 margin loss 加上 SH
