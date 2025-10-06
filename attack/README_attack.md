@@ -22,14 +22,38 @@ pip install torch transformers soundfile pyctcdecode
 ## 使用方法
 
 ```bash
-python attack_sh.py \
-  --input path/to/original.wav \
-  --output path/to/adversarial.wav \
+# 假设你在项目根目录，脚本位于 attack/ 下，音频位于同级根目录：
+# 方式一：直接调用脚本文件（无需切换目录）
+python attack/attack_sh.py \
+  --input original.wav   # 原始音频在根目录
+  --output attack/attack_original.wav  # 对抗样本保存到 attack/ 目录，如果不指定，自动在同目录下生成 attack_original.wav
   --model facebook/wav2vec2-base-960h \
   --iterations 100 \
   --lr 1e-2 \
   --c 1.0 \
   --alpha 1.0 \
+  --k 1.0
+
+# 方式二：先进入 attack/ 目录再运行（输入路径需回溯到上级）
+cd attack
+python attack_sh.py \
+  --input ../original.wav \
+  --output attack_original.wav \ 
+  --model facebook/wav2vec2-base-960h \
+  --iterations 100 \
+  --lr 1e-2 \
+  --c 1.0 \
+  --alpha 1.0 \
+  --k 1.0
+```
+
+```bash
+python .\attack\attack_sh.py `
+  --input .\7729-102255-0000.flac `
+  --iterations 1000 `
+  --lr 1e-2 `
+  --c 1.0 `
+  --alpha 1.0 `
   --k 1.0
 ```
 

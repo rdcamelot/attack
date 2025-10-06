@@ -5,7 +5,7 @@ attack_sh.py
 
 攻击思路：
 1. 加载原始音频；
-2. 获取原始对齐标签 y_f；
+2. 获取原始对齐标签 y_f;
 3. 初始化扰动 δ；
 4. 迭代优化 δ 使得模型输出序列 ≠ 原始标签；
 5. 输出并保存攻击后音频与指标。
@@ -15,6 +15,14 @@ attack_sh.py
 import argparse
 import torch
 from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
+import os  # 用于生成默认输出路径
+import sys
+
+# 将项目根目录加入模块搜索路径，支持脚本直接运行
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from attack.loss_sh import attack_loss
 from attack.utils_sh import load_audio, save_audio, get_alignment, is_attack_success, compute_snr
@@ -23,7 +31,8 @@ from attack.utils_sh import load_audio, save_audio, get_alignment, is_attack_suc
 def main():
     parser = argparse.ArgumentParser(description="Untargeted sequence-level attack on wav2vec2-CTC model")
     parser.add_argument("--input", type=str, required=True, help="原始音频文件路径 (.wav/.flac)")
-    parser.add_argument("--output", type=str, required=True, help="保存对抗样本音频文件路径")
+    parser.add_argument("--output", type=str, default=None,
+                        help="保存对抗样本音频路径，可选；默认在输入文件同目录，前缀 'attack_'")
     parser.add_argument("--model", type=str, default="facebook/wav2vec2-base-960h", help="预训练模型名")
     parser.add_argument("--iterations", type=int, default=100, help="优化迭代次数")
     parser.add_argument("--lr", type=float, default=1e-2, help="Adam 学习率")
@@ -83,7 +92,15 @@ def main():
 
     # 5. 结果输出：保存音频与指标
     x_adv = torch.clamp(x_orig + delta, -1.0, 1.0)
-    save_audio(args.output, x_adv)
+    # 保存对抗音频：若未指定输出路径，默认在原文件同目录，加前缀 'attack_'
+    if args.output:
+        output_path = args.output
+    else:
+        base = os.path.basename(args.input)
+        folder = os.path.dirname(args.input)
+        # 在输入文件同目录生成前缀 'attack_' 的文件名
+        output_path = os.path.join(folder, f"attack_{base}")
+    save_audio(output_path, x_adv)
 
     # 最终预测文本
     logits_final = logits_adv.detach()
@@ -92,6 +109,7 @@ def main():
     text_adv = processor.batch_decode(preds.unsqueeze(0))[0]
 
     snr = compute_snr(x_orig.detach(), (x_adv - x_orig).detach())
+    print(f"已保存对抗样本: {output_path}")
     print(f"Original transcription: {text_orig}")
     print(f"Adversarial transcription: {text_adv}")
     print(f"SNR(dB): {snr:.2f}")

@@ -13,7 +13,7 @@ import torch.nn.functional as F
 
 def margin_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """
-    计算 margin loss：
+    计算 margin loss:
     d_f = z_f[y_f] - max_{j≠y_f} z_f[j]
     L_margin = sum(max(d_f, 0))
     logits: [T, C]
@@ -69,7 +69,7 @@ def attack_loss(logits: torch.Tensor,
                 alpha: float = 1.0,
                 k: float = 1.0) -> torch.Tensor:
     """
-    组合最终损失：L = ||δ||_2^2 + c * (S * H * L_margin)
+    组合最终损失: L = ||δ||_2^2 + c * (S * H * L_margin)
     logits: [T, C], labels: [T], delta: [L]
     c: 权重系数
     """
