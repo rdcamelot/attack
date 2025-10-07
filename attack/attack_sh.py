@@ -45,21 +45,22 @@ def main():
     # 设备选择：优先 GPU
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # 1. 加载模型与 processor
+    # 加载模型与 processor
     processor = Wav2Vec2Processor.from_pretrained(args.model)
     model = Wav2Vec2ForCTC.from_pretrained(args.model).to(device)
     model.eval()
 
-    # 2. 加载音频并获取原始 logits 以及贪心对齐标签 y_f，用于 loss 计算
+    # 加载音频并获取原始 logits 以及贪心对齐标签 y_f，用于 loss 计算
     x_orig = load_audio(args.input).to(device)  # [L]
     logits_orig, y_f = get_alignment(x_orig, processor, model, device)  # logits: [T, C], y_f: [T]
-    
+
     # 将原始 logits 解码为文本 transcript（用于后续序列级成功判断）
     orig_ids = torch.argmax(logits_orig, dim=-1)
     orig_text = processor.batch_decode(orig_ids.unsqueeze(0))[0].upper().strip()
     print(f"[i] Original transcription: {orig_text}")
 
-    # 3. 初始化扰动 δ，需梯度
+    # 初始化扰动 δ，需梯度
+    # 和原始 waveform 形状相同
     delta = torch.zeros_like(x_orig, requires_grad=True, device=device)
 
     # 优化器
@@ -76,16 +77,22 @@ def main():
 
         # 4. 计算攻击损失并反向更新 δ
         loss = attack_loss(logits_adv, y_f, delta, args.c, args.alpha, args.k)
+
+        # 在 backward 前清除旧的梯度，否则梯度会累加
         optimizer.zero_grad()
+
+        # 计算 δ 的梯度
         loss.backward()
-        # Debug: print gradient norm of delta to check if gradients flow
+        # Debug: 查看梯度范数，确保没有被截断
         if delta.grad is not None:
             grad_norm = delta.grad.norm().item()
         else:
             grad_norm = float('nan')
+        
         print(f"Debug: iteration {it}, delta.grad.norm={grad_norm:.6f}")
         optimizer.step()
-        # Debug: print updated delta norm to verify updates
+
+        # Debug: 输出更新后的 delta , 确保更新
         delta_norm = delta.norm().item()
         print(f"Debug: iteration {it}, delta.norm={delta_norm:.6f}")
 

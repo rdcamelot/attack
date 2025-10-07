@@ -61,6 +61,7 @@ def recognition_score(logits: torch.Tensor, labels: torch.Tensor, alpha: float =
 """
 节约扰动的核心: H
 取其中的最弱帧, 如果其等于 0, 说明已经有一帧被攻击成功了, 可以降低权重
+但是在语音识别中可能没法直接使用, 因为在使用 CTC beam search 的时候, 最弱帧可能并不等同于一个符号被删除或替换
 """
 def step_function(logits: torch.Tensor, labels: torch.Tensor, k: float = 1.0) -> torch.Tensor:
     """
