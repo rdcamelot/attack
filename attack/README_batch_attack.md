@@ -35,8 +35,8 @@ pip install torch transformers soundfile pyctcdecode tqdm
 ```bash
 # 方式一：直接从项目根目录运行 (PowerShell 风格)
 python .\attack\batch_attack_sh.py `
-  --input_dir ..\data\LibriSpeech\test-clean\7729 `
-  --output_dir ..\attack_results\attack_7729 `
+  --input_dir .\data\LibriSpeech\test-clean\7729 `
+  --output_dir .\attack_results\attack_7729 `
   --model facebook/wav2vec2-base-960h `
   --iterations 100 `
   --lr 1e-2 `
@@ -63,6 +63,19 @@ python .\batch_attack_sh.py `
 - `--input_dir`: 包含待攻击音频的根目录（支持递归子目录）。  
 - `--output_dir`: 对抗样本保存根目录，脚本会自动创建子目录。  
 - 其他参数与 `attack_sh.py` 一致，用于调整优化超参。
+
+未指定输出目录
+```bash
+python .\attack\batch_attack_sh.py `
+  --input_dir .\data\LibriSpeech\test-clean\7729 `
+  --model facebook/wav2vec2-base-960h `
+  --iterations 100 `
+  --lr 1e-2 `
+  --c 1.0 `
+  --alpha 1.0 `
+  --k 1.0 `
+  --sr 16000
+```
 
 脚本执行完毕后，会在终端打印：  
 ```
