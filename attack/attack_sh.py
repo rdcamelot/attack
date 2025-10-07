@@ -24,6 +24,7 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+# 导入其他两个模块
 from attack.loss_sh import attack_loss
 from attack.utils_sh import load_audio, save_audio, get_alignment, is_attack_success, compute_snr
 
@@ -49,9 +50,14 @@ def main():
     model = Wav2Vec2ForCTC.from_pretrained(args.model).to(device)
     model.eval()
 
-    # 2. 加载音频并获取原始 logits 和对齐标签 y_f
+    # 2. 加载音频并获取原始 logits 以及贪心对齐标签 y_f，用于 loss 计算
     x_orig = load_audio(args.input).to(device)  # [L]
     logits_orig, y_f = get_alignment(x_orig, processor, model, device)  # logits: [T, C], y_f: [T]
+    
+    # 将原始 logits 解码为文本 transcript（用于后续序列级成功判断）
+    orig_ids = torch.argmax(logits_orig, dim=-1)
+    orig_text = processor.batch_decode(orig_ids.unsqueeze(0))[0].upper().strip()
+    print(f"[i] Original transcription: {orig_text}")
 
     # 3. 初始化扰动 δ，需梯度
     delta = torch.zeros_like(x_orig, requires_grad=True, device=device)
@@ -83,16 +89,24 @@ def main():
         delta_norm = delta.norm().item()
         print(f"Debug: iteration {it}, delta.norm={delta_norm:.6f}")
 
-        # 每 10 次打印进度
+        # 每 10 次或首次打印当前迭代信息
         if it % 10 == 0 or it == 1:
-            # 计算当前对齐
-            y_adv = torch.argmax(logits_adv, dim=-1)
-            succ = is_attack_success(y_f, y_adv)
-            print(f"Iter {it}/{args.iterations}: loss={loss.item():.4f}, success={succ}")
+            # 解码对抗样本 logits 得到当前转录
+            adv_ids = torch.argmax(logits_adv, dim=-1)
+            adv_text = processor.batch_decode(adv_ids.unsqueeze(0))[0].upper().strip()
+            # 序列级判断：只要文本不同即视为攻击成功
+            succ = (adv_text != orig_text)
+            print(
+                f"Iter {it}/{args.iterations}: loss={loss.item():.4f}, "
+                f"adv_text={adv_text!r}, success={succ}"
+            )
 
-        if is_attack_success(y_f, torch.argmax(logits_adv, dim=-1)):
+        # 序列级成功判断：文本变化则结束攻击
+        adv_ids = torch.argmax(logits_adv, dim=-1)
+        adv_text = processor.batch_decode(adv_ids.unsqueeze(0))[0].upper().strip()
+        if adv_text != orig_text:
             success = True
-            print(f"[+] Attack succeeded at iteration {it}")
+            print(f"[+] Attack succeeded at iteration {it}, adv_text={adv_text}")
             break
 
     # 5. 结果输出：保存音频与指标

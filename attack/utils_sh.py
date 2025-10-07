@@ -45,23 +45,45 @@ def save_audio(path: str, audio: torch.Tensor, sr: int = 16000) -> None:
     sf.write(path, data, sr)
 
 """
+使用贪心 CTC 对齐获取原始音频的每帧标签。
+
 margin loss 是逐帧的, 因此必须把原始转录对齐到每个时间步才能得到 labels y_f
+
+这里是在做离线对齐，把原始 waveform pad/normalize 并分帧，不会影响 δ 的梯度链
+
+在攻击主循环中的前向中, 才不调用 processor, 保证能够获得梯度
 """
 def get_alignment(audio: torch.Tensor,
+                  processor: Wav2Vec2Processor,
                   model: Wav2Vec2ForCTC,
                   device: str | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    对输入 waveform 做 CTC 贪心对齐，返回 logits [T, C] 和每帧预测标签 y_f [T]。
-    直接使用模型接收 raw waveform，保证梯度连通性。
+    参数:
+      audio: [L] 波形 Tensor, 单通道、float32。
+      processor: Wav2Vec2Processor, 用于特征提取和 padding。
+      model: Wav2Vec2ForCTC, CTC 识别模型。
+      device: 设备字符串 ('cpu' 或 'cuda')。
+
+    返回:
+      logits: Tensor [T, C]，模型输出 logits。
+      y_f: Tensor [T]，每帧的贪心预测 token id, 用于后续计算 margin_loss。
     """
+    # 设备选择
     if device is None:
         device = next(model.parameters()).device
     model.eval()
-    # 直接将 waveform 送入模型
+    # 特征提取：processor 会做归一化和 padding
     with torch.no_grad():
-        input_values = audio.unsqueeze(0).to(device)  # [1, L]
+        inputs = processor(audio,
+                           sampling_rate=processor.feature_extractor.sampling_rate,
+                           return_tensors="pt",
+                           padding=True)
+        # 输入形状 [1, L]
+        input_values = inputs.input_values.to(device)
+        # 前向获取 logits [1, T, C]
         logits = model(input_values).logits.squeeze(0)  # [T, C]
-    y_f = torch.argmax(logits, dim=-1)
+    # 贪心对齐：每帧选择概率最大的 token id
+    y_f = torch.argmax(logits, dim=-1)  # [T]
     return logits, y_f
 
 
@@ -76,6 +98,8 @@ def compute_snr(orig: torch.Tensor, delta: torch.Tensor) -> float:
     """
     计算信噪比 SNR(dB): 10 * log10( sum(orig^2) / sum(delta^2) )
     """
+    # 计算信号能量以及噪声能量
     orig_power = torch.sum(orig ** 2)
     noise_power = torch.sum(delta ** 2)
+    # 计算能量比并转换成分贝
     return 10 * torch.log10(orig_power / (noise_power + 1e-8)).item()
