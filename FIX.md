@@ -177,3 +177,5 @@ for module in model.feature_extractor.modules():
 
 原先使用 `processor`，内部会把 waveform 变成 float、做归一化、分帧、拼 batch，再转给模型。
 这些步骤往往是 numpy 或包在 torch.no_grad() 里，断开了对原始 waveform（δ）的计算图，梯度无法回传到 δ。
+
+

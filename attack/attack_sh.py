@@ -69,13 +69,16 @@ def main():
     success = False
     for it in range(1, args.iterations + 1):
         # 合成对抗样本并裁剪到 [-1,1]
+        # 音频 waveform 在常规处理下被规范到 [-1, 1] 的浮点范围，超出会失真或溢出
+        # 这样裁剪后能保证生成的对抗样本仍然是合法的音频样本
+        # 这样即能够避免数值问题, 也能模拟真实场景中的扰动只能微小添加
         x_adv = torch.clamp(x_orig + delta, -1.0, 1.0)
 
         # 前向，直接使用 raw waveform 以保证梯度连通
         input_values = x_adv.unsqueeze(0).to(device)  # [1, L]
         logits_adv = model(input_values).logits.squeeze(0)  # [T, C]
 
-        # 4. 计算攻击损失并反向更新 δ
+        # 计算攻击损失并反向更新 δ
         loss = attack_loss(logits_adv, y_f, delta, args.c, args.alpha, args.k)
 
         # 在 backward 前清除旧的梯度，否则梯度会累加
@@ -89,6 +92,9 @@ def main():
         else:
             grad_norm = float('nan')
         
+        # 分隔调试信息
+        print()
+
         print(f"Debug: iteration {it}, delta.grad.norm={grad_norm:.6f}")
         optimizer.step()
 
@@ -96,27 +102,38 @@ def main():
         delta_norm = delta.norm().item()
         print(f"Debug: iteration {it}, delta.norm={delta_norm:.6f}")
 
-        # 每 10 次或首次打印当前迭代信息
-        if it % 10 == 0 or it == 1:
-            # 解码对抗样本 logits 得到当前转录
-            adv_ids = torch.argmax(logits_adv, dim=-1)
-            adv_text = processor.batch_decode(adv_ids.unsqueeze(0))[0].upper().strip()
-            # 序列级判断：只要文本不同即视为攻击成功
-            succ = (adv_text != orig_text)
-            print(
-                f"Iter {it}/{args.iterations}: loss={loss.item():.4f}, "
-                f"adv_text={adv_text!r}, success={succ}"
-            )
+        # # 每 10 次或首次打印当前迭代信息
+        # if it % 10 == 0 or it == 1:
+        #     # 解码对抗样本 logits 得到当前转录
+        #     adv_ids = torch.argmax(logits_adv, dim=-1)
+        #     adv_text = processor.batch_decode(adv_ids.unsqueeze(0))[0].upper().strip()
+        #     # 序列级判断：只要文本不同即视为攻击成功
+        #     succ = (adv_text != orig_text)
+        #     print(
+        #         f"Iter {it}/{args.iterations}: loss={loss.item():.6f}, "
+        #         f"adv_text={adv_text!r}, success={succ}"
+        #     )
+
+        # 解码对抗样本 logits 得到当前转录
+        adv_ids = torch.argmax(logits_adv, dim=-1)
+        adv_text = processor.batch_decode(adv_ids.unsqueeze(0))[0].upper().strip()
+        # 序列级判断：只要文本不同即视为攻击成功
+        succ = (adv_text != orig_text)
+        print(
+            f"Iter {it}/{args.iterations}: loss={loss.item():.6e}, "
+            f"adv_text={adv_text!r}, success={succ}"
+        )
 
         # 序列级成功判断：文本变化则结束攻击
         adv_ids = torch.argmax(logits_adv, dim=-1)
         adv_text = processor.batch_decode(adv_ids.unsqueeze(0))[0].upper().strip()
         if adv_text != orig_text:
             success = True
-            print(f"[+] Attack succeeded at iteration {it}, adv_text={adv_text}")
+            print()
+            print(f"[+] Attack succeeded at iteration {it}, adv_text={adv_text}\n")
             break
 
-    # 5. 结果输出：保存音频与指标
+    # 结果输出：保存音频与指标
     x_adv = torch.clamp(x_orig + delta, -1.0, 1.0)
     # 保存对抗音频：若未指定输出路径，默认在原文件同目录，加前缀 'attack_'
     if args.output:
@@ -136,8 +153,8 @@ def main():
 
     snr = compute_snr(x_orig.detach(), (x_adv - x_orig).detach())
     print(f"已保存对抗样本: {output_path}")
-    print(f"Original transcription: {text_orig}")
-    print(f"Adversarial transcription: {text_adv}")
+    print(f"Original transcription:\n {text_orig}")
+    print(f"Adversarial transcription:\n {text_adv}")
     print(f"SNR(dB): {snr:.2f}")
     print(f"Attack {'Succeeded' if success else 'Failed'}")
 
