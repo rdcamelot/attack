@@ -1,3 +1,16 @@
+"""
+```bash
+python .\attack\batch_attack_sh.py `
+  --input_dir .\data\LibriSpeech\test-clean\7729`
+  --model facebook/wav2vec2-base-960h `
+  --iterations 100 `
+  --lr 1e-2 `
+  --c 1.0 `
+  --alpha 1.0 `
+  --k 1.0 `
+  --sr 16000
+```
+"""
 import os
 import argparse
 from tqdm import tqdm

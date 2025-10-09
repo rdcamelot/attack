@@ -57,17 +57,6 @@ python .\attack\attack_sh.py `
   --k 1.0
 ```
 
-暂时还无法成功使用
-```bash
-python .\attack\attack_sh_zh.py `
-  --input .\IC0936W0060.wav `
-  --iterations 100 `
-  --lr 1e-2 `
-  --c 1.0 `
-  --alpha 1.0 `
-  --k 1.0
-```
-
 - `--input`: 原始干净音频（.wav/.flac）路径
 - `--output`: 保存对抗样本
 - `--model`: 预训练模型名称或路径

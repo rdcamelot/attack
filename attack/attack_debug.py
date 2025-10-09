@@ -1,7 +1,7 @@
 """
 ```bash
-python .\attack\attack_sh.py `
-  --input .\1089-134686-0000.flac `
+python .\attack\attack_debug.py `
+  --input .\7729-102255-0005.flac `
   --iterations 100 `
   --lr 1e-2 `
   --c 1.0 `
@@ -11,32 +11,34 @@ python .\attack\attack_sh.py `
 """
 
 """
-attack_sh.py
+用于分析攻击失败的原因
 
-针对基于 CTC 的 wav2vec2 模型实现 untargeted 序列级攻击（节省扰动的攻击）。
+在之前的攻击代码的基础上添加了帧级margin和argmax token的调试输出
 
-攻击思路：
-1. 加载原始音频；
-2. 获取原始对齐标签 y_f;
-3. 初始化扰动 δ；
-4. 迭代优化 δ 使得模型输出序列 ≠ 原始标签；
-5. 输出并保存攻击后音频与指标。
+计算并统计：
+- min_df / mean_df / max_df: 帧 margin 的最小/平均/最大值；
+- num_changed: 与原始对齐标签不同的帧数；
+- changed_idxs: 前 10 个变化帧的索引。
+每 10 次迭代或到达最大迭代时打印这些信息。
 
-主脚本, 加载模型、迭代更新扰动并输出指标
+利用这些输出来判断：
+- 如果 num_changed 很小但是 adv_text 未变， 说明只是孤立帧被击破， CTC collapse 忽略了它；
+- 如果 min_df 仍然很正或均值接近原始，说明大多数帧 margin 未被破坏，需要更强的整体扰动；
+
+这样通过对比不同失败样本的变化分布, 看是否应该换用 collapse 后的 frame 针对更粗粒度做 margin 计算
 """
+
 import argparse
 import torch
 from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC
-import os  # 用于生成默认输出路径
+import os
 import sys
 
-# 将项目根目录加入模块搜索路径，支持脚本直接运行
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-# 导入其他两个模块
 from attack.loss_sh import attack_loss
 from attack.utils_sh import load_audio, save_audio, get_alignment, is_attack_success, compute_snr
 
@@ -54,89 +56,72 @@ def main():
     parser.add_argument("--k", type=float, default=1.0, help="step 函数的 k")
     args = parser.parse_args()
 
-    # 设备选择：优先 GPU
+    # 正常攻击流程
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # 加载模型与 processor
     processor = Wav2Vec2Processor.from_pretrained(args.model)
     model = Wav2Vec2ForCTC.from_pretrained(args.model).to(device)
     model.eval()
-
-    # 加载音频并获取原始 logits 以及贪心对齐标签 y_f，用于 loss 计算
     x_orig = load_audio(args.input).to(device)  # [L]
     logits_orig, y_f = get_alignment(x_orig, processor, model, device)  # logits: [T, C], y_f: [T]
-
-    # 将原始 logits 解码为文本 transcript（用于后续序列级成功判断）
     orig_ids = torch.argmax(logits_orig, dim=-1)
     orig_text = processor.batch_decode(orig_ids.unsqueeze(0))[0].upper().strip()
     print(f"[i] Original transcription: {orig_text}")
-
-    # 初始化扰动 δ，需梯度
-    # 和原始 waveform 形状相同
     delta = torch.zeros_like(x_orig, requires_grad=True, device=device)
-
-    # 优化器
     optimizer = torch.optim.Adam([delta], lr=args.lr)
-
     success = False
-    for it in range(1, args.iterations + 1):
-        # 合成对抗样本并裁剪到 [-1,1]
-        # 音频 waveform 在常规处理下被规范到 [-1, 1] 的浮点范围，超出会失真或溢出
-        # 这样裁剪后能保证生成的对抗样本仍然是合法的音频样本
-        # 这样即能够避免数值问题, 也能模拟真实场景中的扰动只能微小添加
-        x_adv = torch.clamp(x_orig + delta, -1.0, 1.0)
 
+    for it in range(1, args.iterations + 1):
+        x_adv = torch.clamp(x_orig + delta, -1.0, 1.0)
         # 前向，直接使用 raw waveform 以保证梯度连通
         input_values = x_adv.unsqueeze(0).to(device)  # [1, L]
         logits_adv = model(input_values).logits.squeeze(0)  # [T, C]
 
-        # 计算攻击损失并反向更新 δ
+        # Debug: 计算并打印帧级 margin 和 argmax token 变化情况
+        frames = logits_adv.size(0)
+        idx = torch.arange(frames, device=device)
+        true_logits = logits_adv[idx, y_f]
+        masked = logits_adv.clone()
+        masked[idx, y_f] = float('-inf')
+        other_max, _ = masked.max(dim=1)
+        d_f = true_logits - other_max  # [T]
+        argmax_tokens = torch.argmax(logits_adv, dim=-1)  # [T]
+        # 统计信息
+        min_df = d_f.min().item()
+        mean_df = d_f.mean().item()
+        max_df = d_f.max().item()
+        num_changed = (argmax_tokens != y_f).sum().item()
+        # 每 10 次或最后一次迭代打印帧级调试信息
+        if it % 10 == 0 or it == args.iterations:
+            print()
+            changed_idxs = torch.nonzero(argmax_tokens != y_f).squeeze(1).tolist()
+            print(f"Frame margin stats: min={min_df:.2f}, mean={mean_df:.2f}, max={max_df:.2f}")
+            print(f"Changed frames: {num_changed}/{frames}, first indices {changed_idxs[:10]} ...")
+        # === End ===
+
         loss = attack_loss(logits_adv, y_f, delta, args.c, args.alpha, args.k)
-
-        # 在 backward 前清除旧的梯度，否则梯度会累加
         optimizer.zero_grad()
-
-        # 计算 δ 的梯度
         loss.backward()
-        # Debug: 查看梯度范数，确保没有被截断
-        if delta.grad is not None:
-            grad_norm = delta.grad.norm().item()
-        else:
-            grad_norm = float('nan')
-        
-        # 分隔调试信息
-        print()
-
-        print(f"Debug: iteration {it}, delta.grad.norm={grad_norm:.6f}")
+        # if delta.grad is not None:
+        #     grad_norm = delta.grad.norm().item()
+        # else:
+        #     grad_norm = float('nan')
+        # print(f"Debug: iteration {it}, delta.grad.norm={grad_norm:.6f}")
         optimizer.step()
+        # delta_norm = delta.norm().item()
+        # print(f"Debug: iteration {it}, delta.norm={delta_norm:.6f}")
 
-        # Debug: 输出更新后的 delta , 确保更新
-        delta_norm = delta.norm().item()
-        print(f"Debug: iteration {it}, delta.norm={delta_norm:.6f}")
+        # 每 10 次或首次打印当前迭代信息
+        if it % 10 == 0 or it == 1:
+            # 解码对抗样本 logits 得到当前转录
+            adv_ids = torch.argmax(logits_adv, dim=-1)
+            adv_text = processor.batch_decode(adv_ids.unsqueeze(0))[0].upper().strip()
+            # 序列级判断：只要文本不同即视为攻击成功
+            succ = (adv_text != orig_text)
+            print(
+                f"Iter {it}/{args.iterations}: loss={loss.item():.6e}, "
+                f"adv_text={adv_text!r}, success={succ}"
+            )
 
-        # # 每 10 次或首次打印当前迭代信息
-        # if it % 10 == 0 or it == 1:
-        #     # 解码对抗样本 logits 得到当前转录
-        #     adv_ids = torch.argmax(logits_adv, dim=-1)
-        #     adv_text = processor.batch_decode(adv_ids.unsqueeze(0))[0].upper().strip()
-        #     # 序列级判断：只要文本不同即视为攻击成功
-        #     succ = (adv_text != orig_text)
-        #     print(
-        #         f"Iter {it}/{args.iterations}: loss={loss.item():.6f}, "
-        #         f"adv_text={adv_text!r}, success={succ}"
-        #     )
-
-        # 解码对抗样本 logits 得到当前转录
-        adv_ids = torch.argmax(logits_adv, dim=-1)
-        adv_text = processor.batch_decode(adv_ids.unsqueeze(0))[0].upper().strip()
-        # 序列级判断：只要文本不同即视为攻击成功
-        succ = (adv_text != orig_text)
-        print(
-            f"Iter {it}/{args.iterations}: loss={loss.item():.6e}, "
-            f"adv_text={adv_text!r}, success={succ}"
-        )
-
-        # 序列级成功判断：文本变化则结束攻击
         adv_ids = torch.argmax(logits_adv, dim=-1)
         adv_text = processor.batch_decode(adv_ids.unsqueeze(0))[0].upper().strip()
         if adv_text != orig_text:
