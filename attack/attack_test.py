@@ -1,31 +1,20 @@
 """
 ```bash
-python .\attack\attack_debug.py `
-  --input .\7729-102255-0005.flac `
+python .\attack\attack_test.py `
+  --input .\7729-102255-0008.flac `
   --iterations 100 `
   --lr 1e-2 `
-  --c 1.0 `
+  --lambda_ctc 1.0 `
+  --lambda_run 0.5 `
   --alpha 1.0 `
   --k 1.0
 ```
 """
 
 """
-用于分析攻击失败的原因
-
-在之前的攻击代码的基础上添加了帧级margin和argmax token的调试输出
-
-计算并统计：
-- min_df / mean_df / max_df: 帧 margin 的最小/平均/最大值；
-- num_changed: 与原始对齐标签不同的帧数；
-- changed_idxs: 前 10 个变化帧的索引。
-每 10 次迭代或到达最大迭代时打印这些信息。
-
-利用这些输出来判断：
-- 如果 num_changed 很小但是 adv_text 未变， 说明只是孤立帧被击破， CTC collapse 忽略了它；
-- 如果 min_df 仍然很正或均值接近原始，说明大多数帧 margin 未被破坏，需要更强的整体扰动；
-
-这样通过对比不同失败样本的变化分布, 看是否应该换用 collapse 后的 frame 针对更粗粒度做 margin 计算
+整体形式和 attack_sh.py 类似
+使用了新的损失函数，具体来说就是引入了全局 CTC-NLL(λ_ctc) + Run-level margin(λ_run), 综合序列级和符号级对抗
+这里的run_margin_loss 使用预先 collapse 后的 runs 缓存，避免每轮 RLE 重复计算
 """
 
 import argparse
@@ -39,7 +28,7 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from attack.loss_sh import attack_loss
+from attack.loss_test import attack_loss
 from attack.utils_sh import load_audio, save_audio, get_alignment, is_attack_success, compute_snr
 
 
@@ -51,7 +40,8 @@ def main():
     parser.add_argument("--model", type=str, default="facebook/wav2vec2-base-960h", help="预训练模型名")
     parser.add_argument("--iterations", type=int, default=100, help="优化迭代次数")
     parser.add_argument("--lr", type=float, default=1e-2, help="Adam 学习率")
-    parser.add_argument("--c", type=float, default=1.0, help="损失中序列项权重 c")
+    parser.add_argument("--lambda_ctc", type=float, default=1.0, help="CTC NLL 损失权重 λ_ctc")
+    parser.add_argument("--lambda_run", type=float, default=0.5, help="run_margin 损失权重 λ_run")
     parser.add_argument("--alpha", type=float, default=1.0, help="recognition score 的 α")
     parser.add_argument("--k", type=float, default=1.0, help="step 函数的 k")
     args = parser.parse_args()
@@ -61,14 +51,6 @@ def main():
     processor = Wav2Vec2Processor.from_pretrained(args.model)
     model = Wav2Vec2ForCTC.from_pretrained(args.model).to(device)
     model.eval()
-
-    # 初始化 beam-search 解码器
-    from pyctcdecode import build_ctcdecoder
-    vocab_dict = processor.tokenizer.get_vocab()
-    id_to_token = {v: k for k, v in vocab_dict.items()}
-    vocab = [id_to_token[i] for i in range(len(vocab_dict))]
-    beam_decoder = build_ctcdecoder(vocab)
-
     x_orig = load_audio(args.input).to(device)  # [L]
     logits_orig, y_f = get_alignment(x_orig, processor, model, device)  # logits: [T, C], y_f: [T]
     orig_ids = torch.argmax(logits_orig, dim=-1)
@@ -106,7 +88,16 @@ def main():
             print(f"Changed frames: {num_changed}/{frames}, first indices {changed_idxs[:10]} ...")
         # === End ===
 
-        loss = attack_loss(logits_adv, y_f, delta, args.c, args.alpha, args.k)
+        # 计算综合对抗损失，使用 loss_test.attack_loss
+        loss = attack_loss(
+            logits_adv,
+            y_f,
+            delta,
+            args.alpha,
+            args.k,
+            args.lambda_ctc,
+            args.lambda_run
+        )
         optimizer.zero_grad()
         loss.backward()
         # if delta.grad is not None:
@@ -120,8 +111,7 @@ def main():
 
         # 每 10 次或首次打印当前迭代信息
         if it % 10 == 0 or it == 1:
-            """
-            # 贪心解码对抗样本 logits 得到当前转录
+            # 解码对抗样本 logits 得到当前转录
             adv_ids = torch.argmax(logits_adv, dim=-1)
             adv_text = processor.batch_decode(adv_ids.unsqueeze(0))[0].upper().strip()
             # 序列级判断：只要文本不同即视为攻击成功
@@ -130,27 +120,9 @@ def main():
                 f"Iter {it}/{args.iterations}: loss={loss.item():.6e}, "
                 f"adv_text={adv_text!r}, success={succ}"
             )
-            """
-            # Beam-search 解码对抗样本
-            probs = torch.softmax(logits_adv, dim=-1).cpu().numpy()
-            beam_res = beam_decoder.decode(probs, beam_width=10)
-            adv_text = beam_res[0].upper()
-            # 序列级判断：只要文本不同即视为攻击成功
-            succ = (adv_text != orig_text)
-            print(
-                f"Iter {it}/{args.iterations}: loss={loss.item():.6e}, "
-                f"adv_text={adv_text!r}, success={succ}"
-            )
 
-        """
-        贪心解码
         adv_ids = torch.argmax(logits_adv, dim=-1)
         adv_text = processor.batch_decode(adv_ids.unsqueeze(0))[0].upper().strip()
-        """
-        # 最后使用 beam-search 解码
-        probs = torch.softmax(logits_adv, dim=-1).cpu().numpy()
-        beam_res = beam_decoder.decode(probs, beam_width=10)
-        adv_text = beam_res[0].upper()
         if adv_text != orig_text:
             success = True
             print()

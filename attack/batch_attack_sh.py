@@ -1,7 +1,11 @@
 """
+这里每行命令末尾的空格不能省略, 要正确断行, 用反引号换行但不要把它留在参数值后面
+否则就成为了参数值的一部分, 导致传给脚本的 --input_dir 值末尾多了一个 “\”
+所以脚本去找的是一个并不存在的文件夹
+
 ```bash
 python .\attack\batch_attack_sh.py `
-  --input_dir .\data\LibriSpeech\test-clean\7729`
+  --input_dir .\data\LibriSpeech\test-clean\7729 `
   --model facebook/wav2vec2-base-960h `
   --iterations 100 `
   --lr 1e-2 `

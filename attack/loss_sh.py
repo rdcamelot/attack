@@ -10,6 +10,12 @@ loss_sh.py
 import torch
 import torch.nn.functional as F
 
+# CTC blank token id (排除 blank，从其他选择中去除)
+# 因为如果保留 blank , 那么在 collapase 中会被保留
+from transformers import Wav2Vec2Processor
+processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
+# CTC blank id 在 Wav2Vec2CTCTokenizer 中对应 pad_token_id
+blank_id = processor.tokenizer.pad_token_id
 
 def margin_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """
@@ -26,7 +32,9 @@ def margin_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     
     # 将正确标签位置替换为 -inf，以排除在最大值计算中
     masked = logits.clone()
+    # 排除正确标签和 blank，避免 margin 目标选 blank
     masked[torch.arange(logits.size(0)), labels] = float('-inf')
+    masked[:, blank_id] = float('-inf')
 
     # 对剩余类别取最大 logit，得到 other_max
     other_max, _ = masked.max(dim = 1)
@@ -40,6 +48,7 @@ def margin_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
 
 """
 度量模型对原始对齐路径的整体置信度,将其作为 margin loss 的放大系数
+使用对数域归一化避免 S 下溢
 """
 def recognition_score(logits: torch.Tensor, labels: torch.Tensor, alpha: float = 1.0) -> torch.Tensor:
     """
@@ -50,11 +59,10 @@ def recognition_score(logits: torch.Tensor, labels: torch.Tensor, alpha: float =
     # logits: [T, C] -> 先计算每帧的 log softmax 概率
     log_probs = F.log_softmax(logits, dim=1)
 
-    # 选取正确标签位置的 log_prob 并累加，得到 sum_f log p[y_f]
-    # 在对数域上计算具有更好的数值稳定性
-    sel = log_probs[torch.arange(log_probs.size(0)), labels].sum()
+    # 选取正确标签位置的 log_prob 并求平均，避免长序列下溢
+    sel = log_probs[torch.arange(log_probs.size(0)), labels].mean()
 
-    # 计算识别置信度分数 S = exp(alpha * sum_f log_prob)
+    # 计算识别置信度分数 S = exp(alpha * mean_f log_prob)
     score = torch.exp(alpha * sel)
     return score
 

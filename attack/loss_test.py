@@ -7,12 +7,12 @@ loss_test.py
 各项含义：
  1. L2: ||δ||₂² 二范数正则，最小化扰动能量
  2. CTC_NLL: 对原始序列的 CTC 负对数似然，降低对原始转录的整体置信度
- 3. run_margin: run-level margin，通过对连续同一符号区段（RLE）计算 hinge margin，保证符号级打破
+ 3. run_margin: run-level margin, 通过对连续同一符号区段(RLE)计算 hinge margin, 保证符号级打破
  4. S (recognition_score): 全局置信度评分 exp(α·∑_f log p[y_f])，用于缩放 run_margin
  5. H (step_function): 平滑开关 sigmoid(k·min_f d_f)，基于最弱帧判断何时停止增大惩罚
 
 设计动机与区别：
- - 原始损失只基于单帧 margin+S*H，对 CTC collapse 后的逻辑不敏感
+ - 原始损失只基于单帧 margin + S * H, 对 CTC collapse 后的逻辑不敏感, 因此容易出现攻击失败
  - 引入 CTC_NLL 提供全局序列级目标，直接影响转录概率
  - run_margin 针对 collapse 后的符号区段聚焦，使破坏某个符号 run 更可能改变最终输出
  - 通过混合这三部分，可提高攻击成功率并兼顾扰动最小化
@@ -52,6 +52,7 @@ def margin_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
 
 """
 度量模型对原始对齐路径的整体置信度,将其作为 margin loss 的放大系数
+使用对数域归一化避免 S 下溢
 """
 def recognition_score(logits: torch.Tensor, labels: torch.Tensor, alpha: float = 1.0) -> torch.Tensor:
     """
@@ -62,11 +63,10 @@ def recognition_score(logits: torch.Tensor, labels: torch.Tensor, alpha: float =
     # logits: [T, C] -> 先计算每帧的 log softmax 概率
     log_probs = F.log_softmax(logits, dim=1)
 
-    # 选取正确标签位置的 log_prob 并累加，得到 sum_f log p[y_f]
-    # 在对数域上计算具有更好的数值稳定性
-    sel = log_probs[torch.arange(log_probs.size(0)), labels].sum()
+    # 选取正确标签位置的 log_prob 并求平均，避免长序列下溢
+    sel = log_probs[torch.arange(log_probs.size(0)), labels].mean()
 
-    # 计算识别置信度分数 S = exp(alpha * sum_f log_prob)
+    # 计算识别置信度分数 S = exp(alpha * mean_f log_prob)
     score = torch.exp(alpha * sel)
     return score
 
@@ -96,14 +96,32 @@ def step_function(logits: torch.Tensor, labels: torch.Tensor, k: float = 1.0) ->
     h = torch.sigmoid(k * min_d)
     return h
 
+
+"""
+为何不用“把 run 当作一个时间步”直接算一次 d_run,
+比如直接取 run 内平均之后的 true_run_logits - max_{j≠token} avg_logits[j]
+    这样只会产生一个标量梯度，梯度无法分布到 run 内的各帧。
+    也丢失了把长段“每帧”都驱动朝对抗方向更新的能力。
+    逐帧 hinge 能让每一帧都得到梯度信号，避免大片段中部分帧没被“打破”而攻击失败。
+"""
 # 全局 CTC 损失，用于序列级对抗目标
-blank_id = 0  # 根据 tokenizer 确定 blank token id
+from transformers import Wav2Vec2Processor
+processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
+# CTC blank id 在 Wav2Vec2CTCTokenizer 中对应 pad_token_id
+blank_id = processor.tokenizer.pad_token_id
 ctc_loss_fn = nn.CTCLoss(blank=blank_id, zero_infinity=True)
 
+_cached_runs = None
+_cached_labels = None
 def collapse_runs(labels: torch.Tensor) -> list:
     """
     对 labels (长度 T) 做运行长度编码 (RLE)，返回 [(token, start, end), ...]
+    具体来说即就是将长度为 T 的标签序列按连续相同符号切割成若干段
     """
+    # 运行长度编码，若输入不变则使用缓存
+    global _cached_runs, _cached_labels
+    if _cached_labels is not None and torch.equal(_cached_labels, labels):
+        return _cached_runs
     runs = []
     start = 0
     T = labels.size(0)
@@ -111,6 +129,9 @@ def collapse_runs(labels: torch.Tensor) -> list:
         if i == T or labels[i] != labels[start]:
             runs.append((labels[start].item(), start, i-1))
             start = i
+    # 缓存本次结果, 这样可以避免每次都要 O(n) 来计算
+    _cached_labels = labels.clone()
+    _cached_runs = runs
     return runs
 
 def run_margin_loss(logits: torch.Tensor, labels: torch.Tensor, num_runs: int = None) -> torch.Tensor:
@@ -119,14 +140,22 @@ def run_margin_loss(logits: torch.Tensor, labels: torch.Tensor, num_runs: int = 
     对每个 run 随机或按需选取，累加 run 内每帧 hinge(z[token] - z[alt]).
     """
     runs = collapse_runs(labels)
+    if (num_runs == -1) or (num_runs is None):
+        num_runs = len(runs)
     if num_runs and len(runs) > num_runs:
+        # 进行随机采样
         runs = random.sample(runs, num_runs)
     Lr = torch.tensor(0.0, device=logits.device)
     for token, s, e in runs:
+        # run 内各帧 logits 的平均
         avg_logits = logits[s:e+1].mean(dim=0)
         avg_logits[token] = -1e9
         avg_logits[blank_id] = -1e9
         alt = torch.argmax(avg_logits).item()
+
+        # 原来的 margin_loss 是每帧 df = z[y_f] - max_{j≠y_f} z[j]
+        # 这里是先按照 run 聚合, 选出最有威胁的替代符号 alt(也就是原来的 max_{j≠y_f} z[j]), 再逐帧累加
+        # 也就是这里是用同一个替代符去惩罚整个 run, 而不是各帧各自进行替换
         for f in range(s, e+1):
             Lr += F.relu(logits[f, token] - logits[f, alt])
     return Lr
@@ -143,28 +172,32 @@ def attack_loss(logits: torch.Tensor,
         综合对抗损失:
             L2_loss + lambda_ctc*CTC_NLL + lambda_run*(S*H*run_margin)
         """
-        # === Step1: L2 范数正则化，最小化扰动能量 ||δ||₂² ===
+        # L2 范数正则化，最小化扰动能量 ||δ||₂² 
         l2 = torch.norm(delta.view(-1), p=2) ** 2
             
-        # === Step2: 计算全局置信度 S 和平滑开关 H，用于缩放 run_margin ===
+        # 计算全局置信度 S 和平滑开关 H，用于缩放 run_margin
         # S = exp(α * ∑_f log softmax(logits[f])[labels[f]])
         S = recognition_score(logits, labels, alpha)
         # H = sigmoid(k * min_f (logits[f, y_f] - max_{j≠y_f} logits[f, j]))
         H = step_function(logits, labels, k)
+
         # CTC 序列级 NLL: 降低对原始标签序列的整体置信度
         log_probs = F.log_softmax(logits, dim=-1)
         T, C = logits.shape
         input_lengths = torch.full((1,), T, dtype=torch.long, device=logits.device)
         target = labels.unsqueeze(0)
         target_lengths = torch.full((1,), labels.numel(), dtype=torch.long, device=logits.device)
+        # 给定模型输出序列对原始标签序列的 CTC 负对数似然
+        # 一个标量，表示在当前 log_probs(模型对每帧各类别的对数概率)下，CTC 对齐原始标签序列的负对数似然损失
+        # 负对数似然越大, 说明对原序列越不自信
         ctc_nll = ctc_loss_fn(
             log_probs.unsqueeze(1),  # [T, 1, C]
             target,
             input_lengths,
             target_lengths
         )
-        # === Step4: run-level margin，通过 RLE 对每个符号区段计算 hinge margin ===
+        # run-level margin，通过 RLE 对每个符号区段计算 hinge margin ===
         # 使用 S 和 H 进行缩放，重点惩罚尚未被成功攻击的区段
-        run_term = S * H * run_margin_loss(logits, labels, num_runs=3)
+        run_term = S * H * run_margin_loss(logits, labels, 10)
         # 总 loss
         return l2 + lambda_ctc * ctc_nll + lambda_run * run_term
