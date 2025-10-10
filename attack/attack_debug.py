@@ -71,9 +71,17 @@ def main():
 
     x_orig = load_audio(args.input).to(device)  # [L]
     logits_orig, y_f = get_alignment(x_orig, processor, model, device)  # logits: [T, C], y_f: [T]
+    """
+    使用 贪心解码
     orig_ids = torch.argmax(logits_orig, dim=-1)
     orig_text = processor.batch_decode(orig_ids.unsqueeze(0))[0].upper().strip()
+    """
+    # 使用 beam-search 解码原始转录
+    probs_orig = torch.softmax(logits_orig.detach(), dim=-1).cpu().numpy()
+    orig_text = beam_decoder.decode(probs_orig, beam_width=10).upper().strip()
+
     print(f"[i] Original transcription: {orig_text}")
+
     delta = torch.zeros_like(x_orig, requires_grad=True, device=device)
     optimizer = torch.optim.Adam([delta], lr=args.lr)
     success = False
@@ -132,15 +140,15 @@ def main():
             )
             """
             # Beam-search 解码对抗样本
-            probs = torch.softmax(logits_adv, dim=-1).cpu().numpy()
-            beam_res = beam_decoder.decode(probs, beam_width=10)
-            adv_text = beam_res[0].upper()
+            adv_text = beam_decoder.decode(
+                torch.softmax(logits_adv.detach(), dim=-1).cpu().numpy(), beam_width=10
+            ).upper().strip()
             # 序列级判断：只要文本不同即视为攻击成功
             succ = (adv_text != orig_text)
             print(
-                f"Iter {it}/{args.iterations}: loss={loss.item():.6e}, "
-                f"adv_text={adv_text!r}, success={succ}"
-            )
+                 f"Iter {it}/{args.iterations}: loss={loss.item():.6e}, "
+                 f"adv_text={adv_text!r}, success={succ}"
+             )
 
         """
         贪心解码
@@ -148,9 +156,9 @@ def main():
         adv_text = processor.batch_decode(adv_ids.unsqueeze(0))[0].upper().strip()
         """
         # 最后使用 beam-search 解码
-        probs = torch.softmax(logits_adv, dim=-1).cpu().numpy()
-        beam_res = beam_decoder.decode(probs, beam_width=10)
-        adv_text = beam_res[0].upper()
+        adv_text = beam_decoder.decode(
+            torch.softmax(logits_adv.detach(), dim=-1).cpu().numpy(), beam_width=10
+        ).upper().strip()
         if adv_text != orig_text:
             success = True
             print()
@@ -169,11 +177,20 @@ def main():
         output_path = os.path.join(folder, f"attack_{base}")
     save_audio(output_path, x_adv)
 
-    # 最终预测文本
+    # 最终使用 beam-search 解码原始和对抗文本
     logits_final = logits_adv.detach()
+    """
+    使用贪心解码
     preds = torch.argmax(logits_final, dim=-1)
     text_orig = processor.batch_decode(y_f.unsqueeze(0))[0]
     text_adv = processor.batch_decode(preds.unsqueeze(0))[0]
+    """
+
+    probs_final = torch.softmax(logits_final, dim=-1).detach().cpu().numpy()
+    final_res = beam_decoder.decode(probs_final, beam_width=10)
+    text_adv = final_res
+    # 原始文本已用 beam decode，直接复用 orig_text
+    text_orig = orig_text
 
     snr = compute_snr(x_orig.detach(), (x_adv - x_orig).detach())
     print(f"已保存对抗样本: {output_path}")

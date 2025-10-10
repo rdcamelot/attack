@@ -179,3 +179,35 @@ for module in model.feature_extractor.modules():
 这些步骤往往是 numpy 或包在 torch.no_grad() 里，断开了对原始 waveform（δ）的计算图，梯度无法回传到 δ。
 
 
+
+你遇到的报错：
+
+```
+RuntimeError: Can't call numpy() on Tensor that requires grad. Use tensor.detach().numpy() instead.
+```
+
+原因是：  
+你在 `probs = torch.softmax(logits_adv, dim=-1).cpu().numpy()` 时，`logits_adv` 还在计算图里（requires_grad=True），PyTorch 不允许直接转成 numpy。  
+解决方法：  
+**加 `.detach()`**，即：
+
+```python
+probs = torch.softmax(logits_adv.detach(), dim=-1).cpu().numpy()
+```
+
+这样就能安全地把 tensor 转成 numpy 数组，供 beam-search 解码器使用。
+
+---
+
+另外，其他警告说明：
+
+- `kenlm python bindings are not installed`  
+  只是提示你没有安装语言模型（LM），beam-search会退化为无LM模式，不影响基本功能。
+
+- `Found entries of length > 1 in alphabet...`  
+  说明你的 vocab 里有多字符 token（比如 " ' " 或 " "），但不是 BPE，不影响基本解码。
+
+---
+
+**小结：**  
+只需把 `.cpu().numpy()` 改成 `.detach().cpu().numpy()`，即可解决当前报错。

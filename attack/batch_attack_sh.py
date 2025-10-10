@@ -14,6 +14,8 @@ python .\attack\batch_attack_sh.py `
   --k 1.0 `
   --sr 16000
 ```
+
+同样增加了 beam search 格式
 """
 import os
 import argparse
@@ -31,6 +33,13 @@ def attack_single(x_orig, y_f, orig_text, processor, model, device, args):
     对单段音频执行攻击，返回是否成功、迭代次数和最终 SNR
     攻击逻辑基本和 attack_sh.py 一致
     """
+    # 初始化 beam-search 解码器
+    from pyctcdecode import build_ctcdecoder
+    vocab_dict = processor.tokenizer.get_vocab()
+    id_to_token = {v: k for k, v in vocab_dict.items()}
+    vocab = [id_to_token[i] for i in range(len(vocab_dict))]
+    beam_decoder = build_ctcdecoder(vocab)
+
     # 初始化扰动 delta（可学习）并开启梯度追踪
     delta = torch.zeros_like(x_orig, requires_grad=True, device=device)
     # 使用 Adam 优化器只更新 delta
@@ -52,9 +61,14 @@ def attack_single(x_orig, y_f, orig_text, processor, model, device, args):
         loss.backward()
         optimizer.step()
 
-        # 解码对抗样本文本并判断是否与原始转录不同
+        """
+        贪心解码
         adv_ids = torch.argmax(logits_adv, dim=-1)
         adv_text = processor.batch_decode([adv_ids])[0].upper().strip()
+        """
+        # 使用 beam-search 解码对抗样本并判断是否与原始转录不同
+        probs = torch.softmax(logits_adv.detach(), dim=-1).cpu().numpy()
+        adv_text = beam_decoder.decode(probs, beam_width=10).upper().strip()
         if adv_text != orig_text:
             success = True
             iters = it
